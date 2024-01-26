@@ -14,7 +14,7 @@ import pandas as pd
 import xarray as xr
 import json
 from scipy.signal import savgol_filter
-
+import ipdb
 # =========================================================== #
 # CLASS OBJECT
 # =========================================================== #
@@ -194,8 +194,13 @@ class allocation(object):
         path_scaled_0 = emis_2021_i/emis_2021_w*globalpath
         budget_without_assumptions = path_scaled_0.sum(dim='Time')
         budget_surplus = budget_left - budget_without_assumptions
-
+        # Budget_without_assumptions is the grandfathering path as a functional form 
+        # Transition from budget they have to budget they should have
+        # Why 2040? It has to be 0 at 2021 otherwise it doesnt match
+        # 2100 would make the line too steep 
+        # Square root is the easiest 
         compensation_form = np.array(list(np.linspace(0, 1, len(np.arange(self.start_year_analysis, 2040))))+[1]*len(np.arange(2040, 2101)))
+        # Sharpening the edge of the compensation form
         compensation_form2 = np.convolve(compensation_form, np.ones(3)/3, mode='valid')
         compensation_form[1:-1] = compensation_form2
         compensation_form = compensation_form - compensation_form[0]
@@ -222,6 +227,7 @@ class allocation(object):
         r1_nom = GDP_sum_w / pop_sum_w
         
         base_worldsum = xrt.GHG_base.sel(Region=self.countries_iso).sum(dim='Region')
+        # Power to 1/3 is from Nicoles paper
         rb_part1 = (xrt.GDP.sel(Region=self.FocusRegion) / xrt.Population.sel(Region=self.FocusRegion) / r1_nom)**(1/3.)
         rb_part2 = xrt.GHG_base.sel(Region=self.FocusRegion)*(base_worldsum - xrt.GHG_globe)/base_worldsum
         rb = rb_part1*rb_part2
@@ -229,12 +235,17 @@ class allocation(object):
         ap = self.xr_total.GHG_base.sel(Region=self.FocusRegion) - rb/self.xr_rbw.__xarray_dataarray_variable__*(base_worldsum - self.xr_total.GHG_globe)
         ap = ap.sel(Time=self.analysis_timeframe)
         self.xr_total = self.xr_total.assign(AP = ap)
+        ipdb.set_trace()
     # =========================================================== #
     # =========================================================== #
 
     def gdr(self):
+        '''
+        Greenhouse Development Rights: Uses the Responsibility-Capability Index
+        (RCI) weighed at 50/50 to allocate the global budget
+        '''
         #print('- Allocate by greenhouse development rights')
-        # Read RCI
+        # Read RCI and create XR dataset
         df_rci = pd.read_csv(self.settings['paths']['data']['external'] + "RCI/RCI.xls", 
                              delimiter='\t', 
                              skiprows=30)[:-2]
@@ -244,26 +255,39 @@ class allocation(object):
         dfdummy = df_rci.set_index(['Region', 'Time'])
         xr_rci = xr.Dataset.from_dataframe(dfdummy)
         xr_rci = xr_rci.reindex({"Region": self.xr_total.Region})
-        if self.FocusRegion != 'EU': rci_reg = xr_rci.rci.sel(Region=self.FocusRegion)
+        
+        # If EU, we have to sum over the EU countries
+        if self.FocusRegion != 'EU': 
+            rci_reg = xr_rci.rci.sel(Region=self.FocusRegion)
         else:
             df = pd.read_excel("X:/user/dekkerm/Data/UNFCCC_Parties_Groups_noeu.xlsx", sheet_name = "Country groups")
             countries_iso = np.array(df["Country ISO Code"])
             group_eu = countries_iso[np.array(df["EU"]) == 1]
-            rci_reg = xr_rci.rci.sel(Region=group_eu).sum(dim='Region') # TODO check if this should be a mean instead of a sum
+            rci_reg = xr_rci.rci.sel(Region=group_eu).sum(dim='Region')
+        ipdb.set_trace()
 
         # Compute GDR
+        # Baseline country minus the baseline pathway of rest of the world times the RCI index
+        # If this is higher, you get higher allocation
+        # 
         gdr = self.xr_total.GHG_base.sel(Region=self.FocusRegion) \
             - (self.xr_total.GHG_base.sel(Region=self.countries_iso).sum(dim='Region') \
-                - self.xr_total.GHG_globe)*rci_reg
+                - self.xr_total.GHG_globe)\
+                    *rci_reg
+        # Fraction of the current year compared to the whole period 
         yearfracs = xr.Dataset(data_vars={"Value": (['Time'], 
                                                     (self.analysis_timeframe - 2030) \
                                                         / (self.settings['params']['convergence_year_gdr'] - 2030))}, 
                                coords={"Time": self.analysis_timeframe})
         gdr = gdr.rename('Value')
+        # rci_reg times fraction to smoothen it
+        # First part is exactly the same just for a different time period
         gdr_post2030 = ((self.xr_total.GHG_base.sel(Region=self.FocusRegion) \
             - (self.xr_total.GHG_base.sel(Region=self.countries_iso, Time=self.analysis_timeframe).sum(dim='Region') \
-                - self.xr_total.GHG_globe.sel(Time=self.analysis_timeframe))*rci_reg.sel(Time=2030))*(1-yearfracs) \
-                    + yearfracs*self.xr_total.AP.sel(Time=self.analysis_timeframe)).sel(Time=np.arange(2031, 2101))
+                - self.xr_total.GHG_globe.sel(Time=self.analysis_timeframe))\
+                    *rci_reg.sel(Time=2030))\
+                        *(1-yearfracs) \
+                            + yearfracs*self.xr_total.AP.sel(Time=self.analysis_timeframe)).sel(Time=np.arange(2031, 2101))
         gdr_total = xr.merge([gdr, gdr_post2030])
         gdr_total = gdr_total.rename({'Value': 'GDR'})
         self.xr_total = self.xr_total.assign(GDR = gdr_total.GDR)
