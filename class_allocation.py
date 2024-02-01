@@ -219,20 +219,25 @@ class allocation(object):
     def ap(self):
         '''
         Ability to Pay: Uses GDP per capita to allocate the global budget
+        Equation from van den Berg et al. (2020)
         '''
-        #print('- Allocate by ability to pay')
+        # Step 1: Reductions before correction factor
         xrt = self.xr_total.sel(Time=self.analysis_timeframe)
         GDP_sum_w = xrt.GDP.sel(Region=self.countries_iso).sum(dim='Region')
         pop_sum_w = xrt.Population.sel(Region=self.countries_iso).sum(dim='Region')
         r1_nom = GDP_sum_w / pop_sum_w
         
         base_worldsum = xrt.GHG_base.sel(Region=self.countries_iso).sum(dim='Region')
-        # Power to 1/3 is from Nicoles paper
         rb_part1 = (xrt.GDP.sel(Region=self.FocusRegion) / xrt.Population.sel(Region=self.FocusRegion) / r1_nom)**(1/3.)
         rb_part2 = xrt.GHG_base.sel(Region=self.FocusRegion)*(base_worldsum - xrt.GHG_globe)/base_worldsum
-        rb = rb_part1*rb_part2
+        rb = rb_part1 * rb_part2
         
-        ap = self.xr_total.GHG_base.sel(Region=self.FocusRegion) - rb/self.xr_rbw.__xarray_dataarray_variable__*(base_worldsum - self.xr_total.GHG_globe)
+        # Step 2 Correction factor
+        corr_factor = self.xr_rbw.__xarray_dataarray_variable__/(base_worldsum - self.xr_total.GHG_globe)
+        
+        # Step 3: Budget after correction factor
+        ap = self.xr_total.GHG_base.sel(Region=self.FocusRegion) - rb/corr_factor
+        
         ap = ap.sel(Time=self.analysis_timeframe)
         self.xr_total = self.xr_total.assign(AP = ap)
         ipdb.set_trace()
